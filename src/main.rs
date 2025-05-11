@@ -3,10 +3,11 @@ use clap::Parser;
 use env_logger::{Builder, Target};
 use log::{LevelFilter, error, info};
 use std::io::Write;
-
+use std::thread::current;
 use sim::checker::Checker;
 use sim::input_modeling::ContinuousRandomVariable;
-use sim::models::{Model, Processor};
+use sim::models::{Model, Processor, Stopwatch};
+use sim::models::stopwatch::Metric;
 use sim::report::Report;
 use sim::simulator::{Connector, Message, Simulation};
 /// A command-line application to simulate a ping-pong game with N players.
@@ -42,9 +43,8 @@ fn main() {
         .filter(None, LevelFilter::Info)
         .init();
 
-    let mut models = Vec::new();
-    for i in 0..args.num_players {
-        models.push(Model::new(
+    let mut models : Vec<_> = (0.. args.num_players).map(|i| {
+        Model::new(
             format!("player-{:02}", i + 1),
             Box::new(Processor::new(
                 ContinuousRandomVariable::Exp { lambda: 0.9 },
@@ -54,22 +54,56 @@ fn main() {
                 false,
                 None,
             )),
-        ));
-    }
+        )
+    }).collect();
+    
+    //Build the stop watch model that will collect metrics 
+    // on the time go from first player to last player.
+    models.push(Model::new("Stats".to_string(),
+    Box::new(Stopwatch::new(
+        "start".to_string(),
+        "stop".to_string(),
+        "metric".to_string(),
+        "job".to_string(),
+        Metric::Minimum,
+        false
 
-    let mut connectors = Vec::new();
-    for i in 0..args.num_players {
-        let source_player = format!("player-{:02}", i + 1);
-        let target_player = format!("player-{:02}", (i + 1) % args.num_players + 1); // Connect to the next player (circular)
+    ))));
 
-        connectors.push(Connector::new(
+    //build the ping pong ring.
+    let mut connectors: Vec<_> = (0..args.num_players).map(|i| {
+        let current_player = i + 1;
+        let next_player = (i+1) % args.num_players+1;
+        let source_player = format!("player-{:02}", current_player);
+        let target_player = format!("player-{:02}", next_player);
+        Connector::new(
             format!("{} to {}", source_player, target_player),
             source_player.clone(),
             target_player.clone(),
             String::from("send"),
             String::from("receive"),
-        ));
-    }
+        )
+    }).collect();
+
+    //from first player to start port on stats.
+    let source_player = format!("player-{:02}", 1);
+    let target_player = "Stats".to_string();
+    connectors.push(Connector::new(format!("{} to {}", source_player, target_player),
+        source_player.clone(),
+        target_player.clone(),
+        String::from("send"),
+        String::from("start"),
+    ));
+
+    //from last player to stop port on stats.
+    let source_player = format!("player-{:02}", args.num_players);
+    let target_player = "Stats".to_string();
+    connectors.push(Connector::new(format!("{} to {}", source_player, target_player),
+                                   source_player.clone(),
+                                   target_player.clone(),
+                                   String::from("send"),
+                                   String::from("stop"),
+    ));
 
     let initial_messages = [Message::new(
         "manual".to_string(),
