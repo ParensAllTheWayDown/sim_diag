@@ -2,14 +2,14 @@ use chrono::Local;
 use clap::Parser;
 use env_logger::{Builder, Target};
 use log::{LevelFilter, error, info};
-use std::io::Write;
-use std::thread::current;
 use sim::checker::Checker;
 use sim::input_modeling::ContinuousRandomVariable;
-use sim::models::{Model, Processor, Stopwatch};
-use sim::models::stopwatch::Metric;
+use sim::models::{Model, Processor, Storage};
 use sim::report::Report;
 use sim::simulator::{Connector, Message, Simulation};
+use sim::models::Reportable;
+use std::io::Write;
+use std::thread::current;
 /// A command-line application to simulate a ping-pong game with N players.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -19,8 +19,12 @@ struct Args {
     num_players: usize,
 
     /// Simulation end time
-    #[clap(short, long, default_value_t = 100.0)]
-    end_time: f64,
+    #[clap(short, long)]
+    end_time: Option<f64>,
+
+    /// Simulation end time
+    #[clap(short, long)]
+    iterations: Option<usize>,
 
     /// Generate a diagram of the connected players
     #[clap(long, default_value_t = false)]
@@ -43,84 +47,63 @@ fn main() {
         .filter(None, LevelFilter::Info)
         .init();
 
-    let mut models : Vec<_> = (0.. args.num_players).map(|i| {
-        Model::new(
-            format!("player-{:02}", i + 1),
-            Box::new(Processor::new(
-                ContinuousRandomVariable::Exp { lambda: 0.9 },
-                None,
-                String::from("receive"),
-                String::from("send"),
-                false,
-                None,
-            )),
-        )
-    }).collect();
-    
-    //Build the stop watch model that will collect metrics 
-    // on the time go from first player to last player.
-    models.push(Model::new("Stats".to_string(),
-    Box::new(Stopwatch::new(
-        "start".to_string(),
-        "stop".to_string(),
-        "metric".to_string(),
-        "job".to_string(),
-        Metric::Minimum,
-        false
-
-    ))));
+    let mut models: Vec<_> = (0..args.num_players)
+        .map(|i| {
+            Model::new(
+                format!("player-{:02}", i + 1),
+                Box::new(Processor::new(
+                    ContinuousRandomVariable::Exp { lambda: 0.9 },
+                    None,
+                    String::from("receive"),
+                    String::from("send"),
+                    false,
+                    None,
+                )),
+            )
+        })
+        .collect();
 
     //build the ping pong ring.
-    let mut connectors: Vec<_> = (0..args.num_players).map(|i| {
-        let current_player = i + 1;
-        let next_player = (i+1) % args.num_players+1;
-        let source_player = format!("player-{:02}", current_player);
-        let target_player = format!("player-{:02}", next_player);
-        Connector::new(
-            format!("{} to {}", source_player, target_player),
-            source_player.clone(),
-            target_player.clone(),
-            String::from("send"),
-            String::from("receive"),
-        )
-    }).collect();
+    let mut connectors: Vec<_> = (0..args.num_players)
+        .map(|i| {
+            let current_player = i + 1;
+            let next_player = (i + 1) % args.num_players + 1;
+            let source_player = format!("player-{:02}", current_player);
+            let target_player = format!("player-{:02}", next_player);
+            Connector::new(
+                format!("{} to {}", source_player, target_player),
+                source_player.clone(),
+                target_player.clone(),
+                String::from("send"),
+                String::from("receive"),
+            )
+        })
+        .collect();
 
-    //from first player to start port on stats.
-    let source_player = format!("player-{:02}", 1);
-    let target_player = "Stats".to_string();
-    connectors.push(Connector::new(format!("{} to {}", source_player, target_player),
-        source_player.clone(),
-        target_player.clone(),
-        String::from("send"),
-        String::from("start"),
+    // not using storage to store the value, but collect the records.
+    let storage_model =
+    models.push(Model::new(
+        "Store".to_string(),
+        Box::new(Storage::new(
+            "put".to_string(),
+            "get".to_string(),
+            "stored".to_string(),
+            true,
+        )),
     ));
 
     //from last player to stop port on stats.
     let source_player = format!("player-{:02}", args.num_players);
-    let target_player = "Stats".to_string();
-    connectors.push(Connector::new(format!("{} to {}", source_player, target_player),
-                                   source_player.clone(),
-                                   target_player.clone(),
-                                   String::from("send"),
-                                   String::from("stop"),
+    let target_player = "Store".to_string();
+    connectors.push(Connector::new(
+        format!("{} to {}", source_player, target_player),
+        source_player.clone(),
+        target_player.clone(),
+        String::from("send"),
+        String::from("put"),
     ));
 
-    let initial_messages = [Message::new(
-        "manual".to_string(),
-        "manual".to_string(),
-        "player-01".to_string(),
-        "receive".to_string(),
-        0.0,
-        "Ball".to_string(),
-    )];
-
     let mut simulation = Simulation::post(models, connectors);
-
-    initial_messages.iter().for_each(|m| {
-        info!("injecting intial messages: {:?}", m);
-        simulation.inject_input(m.clone())
-    });
-
     info!("Checking simulation configuration...");
     match simulation.check() {
         Ok(_) => info!("Simulation checks complete"),
@@ -129,16 +112,44 @@ fn main() {
             std::process::exit(1); // Exit with an error code
         }
     }
-
     if args.diagram {
+        info!("Generating Simulation diagram...");
         let dot_graph = simulation.generate_dot_graph();
         println!("{}", dot_graph);
         // You can save this to a file or pipe it to a graphviz tool like dot
     } else {
         info!("Starting simulation...");
 
-        let msgs = simulation.step_until(args.end_time).unwrap();
-        info!("Simulation complete. Messages: {:?}", msgs);
-        info!("Sim State: {}", serde_json::to_string(&simulation).unwrap());
+        // Setup a single 'ball' message that will be sent to 'player-01' receive port to start the simulation activity.
+        let initial_messages = [Message::new(
+            "manual".to_string(),
+            "manual".to_string(),
+            "player-01".to_string(),
+            "receive".to_string(),
+            0.0,
+            "Ball".to_string(),
+        )];
+
+        initial_messages.iter().for_each(|m| {
+            info!("injecting initial messages: {:?}", m);
+            simulation.inject_input(m.clone())
+        });
+
+        let msgs= match (args.end_time, args.iterations) {
+            (Some(end_time), _) => simulation.step_until(end_time).unwrap(),
+            (_, Some(iterations)) => simulation.step_n(iterations).unwrap(),
+            (_,_) => panic!("must provide either 'end_time' or 'iterations'.")
+        };
+        println!("Simulation finished with {} messages", msgs.len());
+        
+        let storage_model = simulation.get_models().get("Store").unwrap();
+        let records = &storage_model.records();
+        println!("{}", serde_json::to_string(records).unwrap());
+        //
+        // info!("Simulation complete. Messages: {:?}", msgs);
+        // info!("Sim State: {}", serde_json::to_string(&simulation).unwrap());
+
+
     }
+
 }
