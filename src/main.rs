@@ -1,15 +1,14 @@
 use chrono::Local;
 use clap::Parser;
-use env_logger::{Builder, Target};
-use log::{LevelFilter, error, info};
+use env_logger::{Builder};
+use log::{error, info, LevelFilter};
 use sim::checker::Checker;
 use sim::input_modeling::ContinuousRandomVariable;
+use sim::models::Reportable;
 use sim::models::{Model, Processor, Storage};
 use sim::report::Report;
 use sim::simulator::{Connector, Message, Simulation};
-use sim::models::Reportable;
 use std::io::Write;
-use std::thread::current;
 /// A command-line application to simulate a ping-pong game with N players.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -81,7 +80,6 @@ fn main() {
         .collect();
 
     // not using storage to store the value, but collect the records.
-    let storage_model =
     models.push(Model::new(
         "Store".to_string(),
         Box::new(Storage::new(
@@ -135,16 +133,17 @@ fn main() {
             simulation.inject_input(m.clone())
         });
 
-        let msgs= match (args.end_time, args.iterations) {
+        // let msgs= match (args.end_time, args.iterations) {
+        match (args.end_time, args.iterations) {
             (Some(end_time), _) => simulation.step_until(end_time).unwrap(),
             (_, Some(iterations)) => simulation.step_n(iterations).unwrap(),
             (_,_) => panic!("must provide either 'end_time' or 'iterations'.")
         };
-        println!("Simulation finished with {} messages", msgs.len());
+        // println!("Simulation finished with {} messages", msgs.len());
         
         let storage_model = simulation.get_models().get("Store").unwrap();
-        let records = &storage_model.records();
-        println!("{}", serde_json::to_string(records).unwrap());
+        println!("round-trip count:{}", &storage_model.records().iter().count())
+        // println!("{}", serde_json::to_string(records).unwrap());
         //
         // info!("Simulation complete. Messages: {:?}", msgs);
         // info!("Sim State: {}", serde_json::to_string(&simulation).unwrap());
